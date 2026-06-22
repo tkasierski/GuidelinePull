@@ -44,21 +44,25 @@ def _load_workbook_from_upload(uploaded_file: BinaryIO):
     return load_workbook(filename=BytesIO(uploaded_file.read()))
 
 
-def extract_tickers_from_workbook(uploaded_file: BinaryIO) -> list[str]:
-    """Read tickers from Info!A8:A17 in an uploaded workbook."""
-    book = _load_workbook_from_upload(uploaded_file)
+def _extract_row_tickers(book) -> list[tuple[int, str]]:
     if "Info" not in book.sheetnames:
         raise ValueError("Uploaded workbook must include a sheet named 'Info'.")
 
     sheet = book["Info"]
-    tickers: list[str] = []
+    row_tickers: list[tuple[int, str]] = []
     for row in TICKER_ROWS:
         value = sheet[f"A{row}"].value
         if value:
             ticker = str(value).strip().upper()
             if ticker:
-                tickers.append(ticker)
-    return tickers
+                row_tickers.append((row, ticker))
+    return row_tickers
+
+
+def extract_tickers_from_workbook(uploaded_file: BinaryIO) -> list[str]:
+    """Read tickers from Info!A8:A17 in an uploaded workbook."""
+    book = _load_workbook_from_upload(uploaded_file)
+    return [ticker for _, ticker in _extract_row_tickers(book)]
 
 
 def _write_descriptions(book, data_by_ticker: dict[str, dict | None]) -> None:
@@ -85,14 +89,13 @@ def _write_descriptions(book, data_by_ticker: dict[str, dict | None]) -> None:
             row += 1
 
 
-def _write_info_sheet(book, data_by_ticker: dict[str, dict | None]) -> None:
+def _write_info_sheet(book, data_by_row: dict[int, tuple[str, dict | None]]) -> None:
     if "Info" not in book.sheetnames:
         raise ValueError("Uploaded workbook must include a sheet named 'Info'.")
 
     sheet = book["Info"]
 
-    for row, ticker in zip(TICKER_ROWS, data_by_ticker.keys()):
-        values = data_by_ticker[ticker]
+    for row, (ticker, values) in data_by_row.items():
         sheet[f"A{row}"] = ticker
         if not values:
             continue
@@ -107,29 +110,22 @@ def fill_workbook(uploaded_file: BinaryIO) -> tuple[bytes, dict[str, dict | None
     Returns: workbook bytes, data_by_ticker, log messages.
     """
     book = _load_workbook_from_upload(uploaded_file)
-    if "Info" not in book.sheetnames:
-        raise ValueError("Uploaded workbook must include a sheet named 'Info'.")
+    row_tickers = _extract_row_tickers(book)
 
-    sheet = book["Info"]
-    tickers = []
-    for row in TICKER_ROWS:
-        value = sheet[f"A{row}"].value
-        if value:
-            ticker = str(value).strip().upper()
-            if ticker:
-                tickers.append(ticker)
-
-    if not tickers:
+    if not row_tickers:
         raise ValueError("No tickers found in Info!A8:A17.")
 
+    data_by_row: dict[int, tuple[str, dict | None]] = {}
     data_by_ticker: dict[str, dict | None] = {}
     logs: list[str] = []
-    for ticker in tickers:
+
+    for row, ticker in row_tickers:
         data, messages = fetch_financial_data(ticker)
         logs.extend(messages)
+        data_by_row[row] = (ticker, data)
         data_by_ticker[ticker] = data
 
-    _write_info_sheet(book, data_by_ticker)
+    _write_info_sheet(book, data_by_row)
     _write_descriptions(book, data_by_ticker)
 
     # Instruct Excel to recalculate formula-driven sections when the file opens.
