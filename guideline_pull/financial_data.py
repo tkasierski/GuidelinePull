@@ -73,6 +73,83 @@ def get_info_value(info: dict, keys: list[str]):
     return NA_VALUE
 
 
+def get_fast_info_value(stock, keys: list[str]):
+    try:
+        fast_info = stock.fast_info
+    except Exception:
+        return NA_VALUE
+
+    for key in keys:
+        try:
+            value = fast_info.get(key) if hasattr(fast_info, "get") else fast_info[key]
+        except Exception:
+            continue
+        if value is not None and pd.notna(value):
+            return _to_python_value(value)
+    return NA_VALUE
+
+
+def get_history_metadata_value(stock, keys: list[str]):
+    try:
+        metadata = stock.get_history_metadata() or {}
+    except Exception:
+        return NA_VALUE
+
+    for key in keys:
+        value = metadata.get(key)
+        if value is not None and pd.notna(value):
+            return _to_python_value(value)
+    return NA_VALUE
+
+
+def get_company_name(stock, ticker: str, info: dict):
+    name = get_info_value(info, ["longName", "shortName"])
+    if name != NA_VALUE:
+        return name
+
+    name = get_history_metadata_value(stock, ["longName", "shortName"])
+    if name != NA_VALUE:
+        return name
+
+    try:
+        quotes = yf.Search(ticker, max_results=8).quotes or []
+    except Exception:
+        return NA_VALUE
+
+    normalized_ticker = ticker.strip().upper()
+    for quote in quotes:
+        if str(quote.get("symbol", "")).strip().upper() != normalized_ticker:
+            continue
+        for key in ["longname", "shortname", "longName", "shortName"]:
+            value = quote.get(key)
+            if value:
+                return value
+    return NA_VALUE
+
+
+def get_dividends_per_share(stock, quarterly_cashflow, total_shares_outstanding):
+    try:
+        history = stock.history(period="1y", auto_adjust=False, actions=True)
+        if history is not None and not history.empty and "Dividends" in history.columns:
+            dividends = pd.to_numeric(history["Dividends"], errors="coerce").dropna()
+            if not dividends.empty:
+                return _to_python_value(dividends.sum())
+    except Exception:
+        pass
+
+    total_dividends_paid = get_ttm_value(
+        quarterly_cashflow,
+        ["CommonStockDividendPaid", "CashDividendsPaid", "DividendsPaid"],
+    )
+    if (
+        total_dividends_paid != NA_VALUE
+        and total_shares_outstanding != NA_VALUE
+        and total_shares_outstanding not in [0, None]
+    ):
+        return abs(total_dividends_paid) / total_shares_outstanding
+    return NA_VALUE
+
+
 def sum_available_values(*values):
     numeric_values = [value for value in values if _is_valid_number(value)]
     if not numeric_values:
@@ -226,20 +303,26 @@ def fetch_financial_data(ticker: str) -> tuple[dict | None, list[str]]:
             messages.append(f"Could not fetch profile info for {normalized_ticker}: {exc}")
             info = {}
 
-        total_dividends_paid = get_ttm_value(
-            quarterly_cashflow,
-            ["CommonStockDividendPaid", "CashDividendsPaid", "DividendsPaid"],
-        )
-        total_shares_outstanding = get_info_value(info, ["sharesOutstanding"])
+        total_shares_outstanding = get_fast_info_value(stock, ["shares"])
+        if total_shares_outstanding == NA_VALUE:
+            total_shares_outstanding = get_info_value(info, ["sharesOutstanding"])
+        if total_shares_outstanding == NA_VALUE:
+            total_shares_outstanding = get_latest_value(
+                latest_balance_sheet,
+                ["OrdinarySharesNumber", "ShareIssued"],
+            )
 
-        if (
-            total_dividends_paid != NA_VALUE
-            and total_shares_outstanding != NA_VALUE
-            and total_shares_outstanding not in [0, None]
-        ):
-            dividends_per_share = total_dividends_paid / total_shares_outstanding
-        else:
-            dividends_per_share = NA_VALUE
+        price_per_share = get_fast_info_value(stock, ["last_price"])
+        if price_per_share == NA_VALUE:
+            price_per_share = get_info_value(info, ["currentPrice", "regularMarketPrice"])
+        if price_per_share == NA_VALUE:
+            price_per_share = get_history_metadata_value(stock, ["regularMarketPrice"])
+
+        dividends_per_share = get_dividends_per_share(
+            stock,
+            quarterly_cashflow,
+            total_shares_outstanding,
+        )
 
         depreciation = get_ttm_value(
             quarterly_cashflow,
@@ -252,8 +335,8 @@ def fetch_financial_data(ticker: str) -> tuple[dict | None, list[str]]:
         )
 
         data = {
-            "Name": get_info_value(info, ["longName", "shortName"]),
-            "Price per Share": get_info_value(info, ["currentPrice", "regularMarketPrice"]),
+            "Name": get_company_name(stock, normalized_ticker, info),
+            "Price per Share": price_per_share,
             "Total Shares Outstanding": total_shares_outstanding,
             "Total Debt": get_latest_value(latest_balance_sheet, ["TotalDebt"]),
             "Interest Expense": get_ttm_value(quarterly_financials, ["InterestExpense", "NetInterestIncome"]),
