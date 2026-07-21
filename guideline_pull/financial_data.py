@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import html
+import re
+from urllib.parse import quote
+
 import pandas as pd
 import yfinance as yf
 
@@ -127,7 +131,39 @@ def get_company_name(stock, ticker: str, info: dict):
     return NA_VALUE
 
 
-def get_reported_beta(stock, info: dict):
+def parse_yahoo_beta_page(page_html: str):
+    patterns = [
+        r'"beta"\s*:\s*\{\s*"raw"\s*:\s*([+-]?(?:\d+(?:\.\d+)?|\.\d+))',
+        r"data-field=['\"]beta['\"][^>]*?value=['\"]([+-]?(?:\d+(?:\.\d+)?|\.\d+))['\"]",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, page_html, flags=re.IGNORECASE)
+        if match:
+            return float(match.group(1))
+
+    page_text = html.unescape(re.sub(r"<[^>]+>", " ", page_html))
+    page_text = re.sub(r"\s+", " ", page_text)
+    match = re.search(
+        r"Beta\s*\(5Y Monthly\)\s*([+-]?(?:\d+(?:\.\d+)?|\.\d+))",
+        page_text,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return float(match.group(1))
+    return NA_VALUE
+
+
+def get_beta_from_yahoo_page(stock, ticker: str):
+    try:
+        url = f"https://finance.yahoo.com/quote/{quote(ticker, safe='')}/"
+        response = stock._data.get(url, timeout=15)
+        response.raise_for_status()
+        return parse_yahoo_beta_page(response.text)
+    except Exception:
+        return NA_VALUE
+
+
+def get_reported_beta(stock, ticker: str, info: dict):
     beta = get_info_value(info, ["beta"])
     if beta != NA_VALUE:
         return beta
@@ -135,17 +171,16 @@ def get_reported_beta(stock, info: dict):
     try:
         result = stock._quote._fetch(modules=["defaultKeyStatistics"]) or {}
         quote_results = result.get("quoteSummary", {}).get("result", [])
-        if not quote_results:
-            return NA_VALUE
-
-        beta = quote_results[0].get("defaultKeyStatistics", {}).get("beta")
-        if isinstance(beta, dict):
-            beta = beta.get("raw")
-        if beta is not None and pd.notna(beta):
-            return _to_python_value(beta)
+        if quote_results:
+            beta = quote_results[0].get("defaultKeyStatistics", {}).get("beta")
+            if isinstance(beta, dict):
+                beta = beta.get("raw")
+            if beta is not None and pd.notna(beta):
+                return _to_python_value(beta)
     except Exception:
         pass
-    return NA_VALUE
+
+    return get_beta_from_yahoo_page(stock, ticker)
 
 
 def get_dividends_per_share(stock, quarterly_cashflow, total_shares_outstanding):
@@ -379,7 +414,7 @@ def fetch_financial_data(ticker: str) -> tuple[dict | None, list[str]]:
             "Forward EPS": get_info_value(info, ["epsForward"]),
             "Current EPS": get_info_value(info, ["trailingEps"]),
             "Dividends Per Share": dividends_per_share,
-            "Beta": get_reported_beta(stock, info),
+            "Beta": get_reported_beta(stock, normalized_ticker, info),
             "Accounts Receivable": get_latest_value(latest_balance_sheet, ["AccountsReceivable", "Receivables", "NetReceivables", "PremiumsReceivable"]),
             "Inventory": get_latest_value(latest_balance_sheet, ["Inventory"]),
             "Current Assets": get_current_assets(latest_balance_sheet),
