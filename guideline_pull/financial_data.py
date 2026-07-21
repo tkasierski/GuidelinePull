@@ -127,6 +127,27 @@ def get_company_name(stock, ticker: str, info: dict):
     return NA_VALUE
 
 
+def get_reported_beta(stock, info: dict):
+    beta = get_info_value(info, ["beta"])
+    if beta != NA_VALUE:
+        return beta
+
+    try:
+        result = stock._quote._fetch(modules=["defaultKeyStatistics"]) or {}
+        quote_results = result.get("quoteSummary", {}).get("result", [])
+        if not quote_results:
+            return NA_VALUE
+
+        beta = quote_results[0].get("defaultKeyStatistics", {}).get("beta")
+        if isinstance(beta, dict):
+            beta = beta.get("raw")
+        if beta is not None and pd.notna(beta):
+            return _to_python_value(beta)
+    except Exception:
+        pass
+    return NA_VALUE
+
+
 def get_dividends_per_share(stock, quarterly_cashflow, total_shares_outstanding):
     try:
         history = stock.history(period="1y", auto_adjust=False, actions=True)
@@ -358,7 +379,7 @@ def fetch_financial_data(ticker: str) -> tuple[dict | None, list[str]]:
             "Forward EPS": get_info_value(info, ["epsForward"]),
             "Current EPS": get_info_value(info, ["trailingEps"]),
             "Dividends Per Share": dividends_per_share,
-            "Beta": get_info_value(info, ["beta"]),
+            "Beta": get_reported_beta(stock, info),
             "Accounts Receivable": get_latest_value(latest_balance_sheet, ["AccountsReceivable", "Receivables", "NetReceivables", "PremiumsReceivable"]),
             "Inventory": get_latest_value(latest_balance_sheet, ["Inventory"]),
             "Current Assets": get_current_assets(latest_balance_sheet),
